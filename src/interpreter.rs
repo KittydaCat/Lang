@@ -1,37 +1,190 @@
-use crate::parser::{Statement, Value};
+use std::collections::HashMap;
 
-#[derive(Debug, PartialEq)]
+use crate::parser::{FunDefinition, Statement, TypedValue, ValueSource};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum RuntimeValue {
-    Number(f64),
+    Number(isize),
+    Object(RuntimeID),
     None,
 }
 
-pub fn exec(statements: &Vec<Statement>) {
-    for statement in statements {
-        match statement {
-            Statement::Value(value) => assert_eq!(RuntimeValue::None, calc_value(value)),
-        }
+#[derive(Clone, Debug)]
+enum RuntimeObject {
+    List(Vec<RuntimeValue>),
+    Struct(Vec<(String, RuntimeValue)>),
+}
+
+#[derive(Eq, Hash, Clone, Copy, Debug, PartialEq)]
+struct RuntimeID(usize);
+
+#[derive(Clone, Default)]
+struct State {
+    functions: HashMap<String, Function>,
+
+    vars: HashMap<String, RuntimeValue>,
+
+    values: HashMap<RuntimeID, RuntimeObject>,
+    curr_index: usize,
+}
+
+impl State {
+    fn add_object(&mut self, object: RuntimeObject) -> RuntimeValue {
+        let index = RuntimeID(self.curr_index);
+        self.curr_index += 1;
+
+        // let runtime_value = values.iter().map(|x| calc_value(x, state)).collect();
+
+        assert!(self.values.insert(index, object).is_none());
+
+        RuntimeValue::Object(index)
     }
 }
 
-fn calc_value(value: &Value) -> RuntimeValue {
-    match value {
-        Value::Function { name, args } => {
-            let args = args.iter().map(calc_value);
+#[derive(Clone)]
+enum Function {
+    Defined(FunDefinition),
+    // Constructor,
+}
+
+pub fn top_level_exec(statements: &Vec<Statement>) {
+    assert_eq!(exec(statements, State::default()), RuntimeValue::None);
+}
+
+fn exec(statements: &Vec<Statement>, mut state: State) -> RuntimeValue {
+    for statement in statements {
+        match statement {
+            Statement::Value(value) => {
+                assert_eq!(RuntimeValue::None, calc_value(value, &mut state))
+            }
+            Statement::VarDefinition(name, value) => {
+                let val = calc_value(value, &mut state);
+
+                assert!(state.vars.insert(name.clone(), val).is_none())
+            }
+            Statement::FunDefinition(name, def) => {
+                assert!(
+                    state
+                        .functions
+                        .insert(name.clone(), Function::Defined(def.clone()))
+                        .is_none()
+                );
+            }
+            Statement::Ret(value) => return calc_value(value, &mut state),
+            Statement::StructDefinition(name, members) => {
+                // TODO
+
+                // assert!(
+                //     state
+                //         .functions
+                //         .insert(name.clone(), Function::Constructor)
+                //         .is_none()
+                // );
+            }
+        }
+    }
+
+    RuntimeValue::None
+}
+
+fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
+    match &value.val_source {
+        ValueSource::Function { name, args } => {
+            let mut args: Vec<_> = args.iter().map(|x| calc_value(x, state)).collect();
 
             match name.as_str() {
                 "print" => {
-                    args.for_each(|x| match x {
-                        RuntimeValue::Number(num) => print!("{num}"),
-                        RuntimeValue::None => todo!(),
-                    });
+                    for x in args {
+                        match x {
+                            RuntimeValue::Number(num) => print!("{num}"),
+                            RuntimeValue::Object(id) => {
+                                print!("{:?}", state.values.get(&id).unwrap())
+                            }
+                            RuntimeValue::None => todo!(),
+                        }
+                    }
 
                     RuntimeValue::None
                 }
 
-                _ => todo!(),
+                "add" => {
+                    let [RuntimeValue::Number(x), RuntimeValue::Number(y)] = args[..] else {
+                        unimplemented!()
+                    };
+
+                    RuntimeValue::Number(x + y)
+                }
+
+                "subtract" => {
+                    let [RuntimeValue::Number(x), RuntimeValue::Number(y)] = args[..] else {
+                        unimplemented!()
+                    };
+
+                    RuntimeValue::Number(x - y)
+                }
+
+                "index" => {
+                    let [RuntimeValue::Object(x), RuntimeValue::Number(y)] = args[..] else {
+                        unimplemented!()
+                    };
+
+                    let RuntimeObject::List(list) = state.values.get(&x).unwrap() else {
+                        unimplemented!("{:?}", state.values.get(&x))
+                    };
+
+                    *(list.get(y as usize).unwrap_or(&RuntimeValue::None))
+                }
+
+                func => {
+                    let fun = state
+                        .functions
+                        .get(func)
+                        .unwrap_or_else(|| panic!("{func}"));
+
+                    match fun {
+                        Function::Defined(fun_definition) => {
+                            let mut new_state = state.clone();
+
+                            let mut arg_names = fun_definition.args.iter();
+                            let mut args_vals = args.into_iter();
+
+                            while let (Some(arg), Some(val)) = (arg_names.next(), args_vals.next())
+                            {
+                                assert!(new_state.vars.insert(arg.0.clone(), val).is_none());
+                            }
+
+                            exec(&fun_definition.statements, new_state)
+                        } // Function::Constructor => state.add_object(RuntimeObject::Struct(args)),
+                    }
+                }
             }
         }
-        Value::Number(x) => RuntimeValue::Number(*x),
+        ValueSource::NumberLiteral(x) => RuntimeValue::Number(*x),
+        ValueSource::Variable(name) => *state.vars.get(name).unwrap(),
+        ValueSource::None => RuntimeValue::None,
+        ValueSource::ListLiteral(values) => {
+            let values = values.iter().map(|x| calc_value(x, state)).collect();
+
+            state.add_object(RuntimeObject::List(values))
+        }
+        ValueSource::MemberAccess { name, item } => {
+            let RuntimeValue::Object(id) = calc_value(item, state) else {
+                unimplemented!()
+            };
+
+            let RuntimeObject::Struct(values) = state.values.get(&id).unwrap() else {
+                unimplemented!()
+            };
+
+            values.iter().find(|x| x.0 == *name).unwrap().1
+        }
+        ValueSource::StructConstruction(items) => {
+            let struc = items
+                .iter()
+                .map(|(name, val)| (name.clone(), calc_value(val, state)))
+                .collect::<Vec<_>>();
+
+            state.add_object(RuntimeObject::Struct(struc))
+        }
     }
 }

@@ -1,1 +1,33 @@
-print(2, 3)
+let x = 5;
+
+let y = [1, 1, 2, 6];
+
+struct A {
+  int x,
+  int y,
+};
+
+let w = A {
+  x: x,
+  y: 1,
+};
+
+fun int add_one(int z) {
+  ret z + 1;
+};
+
+fun int index2([[int]] z) {
+  ret z[0][0];
+};
+
+fun<B> B index3([B] z) {
+  ret z[0];
+};
+
+print([[0, 1]][0][1]);
+
+print(add_one(y[w.y]));
+
+print(index2([[3, 4, 5]]));
+
+print(index3<int>([3, 4, 5]));
