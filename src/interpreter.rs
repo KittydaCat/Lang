@@ -14,6 +14,7 @@ enum RuntimeObject {
     List(Vec<RuntimeValue>),
     Struct(Vec<(String, RuntimeValue)>),
     Function(String),
+    Enum(String, Option<RuntimeValue>),
 }
 
 #[derive(Eq, Hash, Clone, Copy, Debug, PartialEq)]
@@ -43,10 +44,10 @@ impl State {
 }
 
 pub fn top_level_exec(statements: &Vec<Statement>) {
-    assert_eq!(exec(statements, State::default()), RuntimeValue::None);
+    assert_eq!(exec(statements, &mut State::default()), RuntimeValue::None);
 }
 
-fn exec(statements: &Vec<Statement>, mut state: State) -> RuntimeValue {
+fn exec(statements: &Vec<Statement>, mut state: &mut State) -> RuntimeValue {
     for statement in statements {
         match statement {
             Statement::Value(value) => {
@@ -62,6 +63,7 @@ fn exec(statements: &Vec<Statement>, mut state: State) -> RuntimeValue {
             }
             Statement::Ret(value) => return calc_value(value, &mut state),
             Statement::StructDefinition(name, members) => {}
+            Statement::EnumDefinition(name, members) => {}
         }
     }
 
@@ -139,7 +141,7 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
                         assert!(new_state.vars.insert(arg.0.clone(), val).is_none());
                     }
 
-                    exec(&func.statements, new_state)
+                    exec(&func.statements, &mut new_state)
                 }
             }
         }
@@ -172,5 +174,45 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
             state.add_object(RuntimeObject::Struct(struc))
         }
         ValueSource::Function(x) => state.add_object(RuntimeObject::Function(x.clone())),
+        ValueSource::EnumConstruction(enum_member, op) => {
+            let object = RuntimeObject::Enum(
+                enum_member.clone(),
+                if let Some(val) = op {
+                    Some(calc_value(val, state))
+                } else {
+                    None
+                },
+            );
+            state.add_object(object)
+        }
+        ValueSource::Match(typed_value, items) => {
+            let RuntimeValue::Object(index) = calc_value(typed_value, state) else {
+                unimplemented!()
+            };
+
+            let RuntimeObject::Enum(enum_member, option_val) = state.values.get(&index).unwrap()
+            else {
+                unimplemented!()
+            };
+
+            let match_arm = items.iter().find(|x| &x.0 == enum_member).unwrap();
+
+            if let Some(enum_var) = &match_arm.1 {
+                assert!(
+                    state
+                        .vars
+                        .insert(enum_var.clone(), option_val.unwrap())
+                        .is_none()
+                );
+
+                let val = exec(&match_arm.2, state);
+
+                assert!(state.vars.remove(enum_var).is_some());
+
+                val
+            } else {
+                exec(&match_arm.2, state)
+            }
+        }
     }
 }

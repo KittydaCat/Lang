@@ -11,6 +11,7 @@ enum Token {
     Ret,
     Struct,
     Enum,
+    Match,
 
     Number(isize),
 
@@ -37,12 +38,12 @@ pub fn dew_it(file: &str) -> Vec<Statement> {
     parse(
         &mut dbg!(tokenize(file)).into_iter().peekable(),
         &mut State::new(),
-        Type::None,
+        &Type::None,
     )
 }
 
 fn tokenize(file: &str) -> Vec<Token> {
-    let mut cars = file.chars();
+    let mut cars = file.chars().peekable();
 
     let mut string = String::new();
 
@@ -54,7 +55,8 @@ fn tokenize(file: &str) -> Vec<Token> {
         if let Some(c @ ('0'..='9' | 'a'..='z' | 'A'..='Z' | '_')) = next {
             string.push(c);
         } else if !string.is_empty() {
-            if matches!(string.chars().next().unwrap(), '0'..='9') {
+            if matches!(string.chars().next().unwrap(), '-' | '0'..='9') {
+                // todo use string parse do determine if it is a var?
                 tokens.push(Token::Number(string.parse().unwrap()));
 
                 string = String::new();
@@ -65,6 +67,7 @@ fn tokenize(file: &str) -> Vec<Token> {
                     "ret" => Token::Ret,
                     "struct" => Token::Struct,
                     "enum" => Token::Enum,
+                    "match" => Token::Match,
 
                     _ => Token::Name(string),
                 });
@@ -91,7 +94,13 @@ fn tokenize(file: &str) -> Vec<Token> {
 
             Some('=') => tokens.push(Token::Equals),
             Some('+') => tokens.push(Token::Plus),
-            Some('-') => tokens.push(Token::Minus),
+            Some('-') => {
+                if cars.peek().unwrap().is_alphanumeric() {
+                    string.push('-')
+                } else {
+                    tokens.push(Token::Minus)
+                }
+            }
             Some('.') => tokens.push(Token::Dot),
 
             Some('\t' | '\n' | ' ') => {}
@@ -118,7 +127,7 @@ pub enum Statement {
     FunDefinition(String, FunDefinition),
 
     StructDefinition(String, Vec<(String, Type)>),
-    // EnumDefinition(String, Vec<(String, Type)>),
+    EnumDefinition(String, Vec<(String, Option<Type>)>),
     Ret(TypedValue),
 }
 
@@ -137,17 +146,31 @@ pub struct TypedValue {
 
 #[derive(Debug, Clone)]
 pub enum ValueSource {
-    FunctionCall { name: String, args: Vec<TypedValue> },
+    FunctionCall {
+        name: String,
+        args: Vec<TypedValue>,
+    },
+
+    EnumConstruction(String, Option<Box<TypedValue>>),
 
     StructConstruction(Vec<(String, TypedValue)>),
-    MemberAccess { name: String, item: Box<TypedValue> },
+    MemberAccess {
+        name: String,
+        item: Box<TypedValue>,
+    },
 
     NumberLiteral(isize),
+    None,
     ListLiteral(Vec<TypedValue>),
 
     Variable(String),
     Function(String),
-    None,
+
+    // value to match, vec<enum name, Optional binding, statements>
+    Match(
+        Box<TypedValue>,
+        Vec<(String, Option<String>, Vec<Statement>)>,
+    ),
 }
 
 #[derive(PartialEq, Eq, Hash, Debug, Clone)]
@@ -156,8 +179,10 @@ pub enum Type {
     None,
 
     List(Box<Type>),
-    StructName(String),
     Function(Box<Sig>),
+
+    StructName(String),
+    EnumName(String),
 
     TypeVar(String),
 }
@@ -180,8 +205,8 @@ impl Type {
                     t.clone()
                 }
             }
-            t @ (Type::Int | Type::None | Type::StructName(_)) => t.clone(),
             Type::Function(sig) => Type::Function(Box::new(sig.instantiate(type_names, types))),
+            t @ (Type::Int | Type::None | Type::StructName(_) | Type::EnumName(_)) => t.clone(),
         }
     }
 }
@@ -225,13 +250,13 @@ impl Sig {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct SubState {
     var_to_id: HashMap<String, Type>,
     type_params: HashSet<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct State {
     states: Vec<SubState>,
 
@@ -240,6 +265,7 @@ pub struct State {
 
     // structs
     struct_def: HashMap<String, Vec<(String, Type)>>,
+    enum_def: HashMap<String, Vec<(String, Option<Type>)>>,
 
     // inprogress types
     inprogress: HashSet<String>,
@@ -315,70 +341,14 @@ impl State {
         }
     }
 
-    // fn func_sig_to_ret(
-    //     &self,
-    //     name: &str,
-    //     params: &mut impl Iterator<Item = Type>,
-    //     type_params: &[Type],
-    // ) -> Option<Type> {
-    //     match name {
-    //         "index" => {
-    //             // assert_eq!(types.next().unwrap(), Type::LIST);
-    //             let Type::List(list_type) = params.next().unwrap() else {
-    //                 unimplemented!()
-    //             };
-    //             assert_eq!(params.next().unwrap(), Type::Int);
-    //             assert!(params.next().is_none());
-    //             Some(*list_type)
-    //         }
-    //
-    //         "add" => {
-    //             assert_eq!(params.next().unwrap(), Type::Int);
-    //             assert_eq!(params.next().unwrap(), Type::Int);
-    //             assert!(params.next().is_none());
-    //             Some(Type::Int)
-    //         }
-    //
-    //         "subtract" => {
-    //             assert_eq!(params.next().unwrap(), Type::Int);
-    //             assert_eq!(params.next().unwrap(), Type::Int);
-    //             assert!(params.next().is_none());
-    //             Some(Type::Int)
-    //         }
-    //
-    //         "print" => Some(Type::None),
-    //
-    //         _ => {
-    //             dbg!(name);
-    //             if let Some(sig) = self.function_to_sig.get(name) {
-    //                 assert!(sig.matches(params, type_params));
-    //
-    //                 if !type_params.is_empty() {
-    //                     Some(sig.ret_type.instantiate(&sig.type_names, type_params))
-    //                 } else {
-    //                     Some(sig.ret_type.clone())
-    //                 }
-    //             } else if let Some(Type::Function(sig)) = self.var_to_id(name) {
-    //                 assert!(sig.matches(params, type_params));
-    //
-    //                 if !type_params.is_empty() {
-    //                     Some(sig.ret_type.instantiate(&sig.type_names, type_params))
-    //                 } else {
-    //                     Some(sig.ret_type.clone())
-    //                 }
-    //             } else {
-    //                 None
-    //             }
-    //         }
-    //     }
-    // }
-
     fn id_to_struct(&self, struct_name: &str) -> Option<&[(String, Type)]> {
         self.struct_def.get(struct_name).map(|y| y.as_slice())
     }
 
     fn name_to_type(&self, type_name: &str) -> Option<Type> {
-        if self.struct_def.get(type_name).is_some() {
+        if self.enum_def.get(type_name).is_some() {
+            Some(Type::EnumName(String::from(type_name)))
+        } else if self.struct_def.get(type_name).is_some() {
             Some(Type::StructName(String::from(type_name)))
         } else if self.states.last().unwrap().type_params.contains(type_name) {
             Some(Type::TypeVar(String::from(type_name)))
@@ -401,7 +371,7 @@ impl State {
 fn parse(
     tokens: &mut Peekable<IntoIter<Token>>,
     state: &mut State,
-    ret_type: Type,
+    ret_type: &Type,
 ) -> Vec<Statement> {
     let mut statements = Vec::new();
 
@@ -508,7 +478,7 @@ fn parse(
 
                 assert_eq!(Some(Token::LBrace), tokens.next());
 
-                let func_statements = parse(tokens, state, ret_type.clone());
+                let func_statements = parse(tokens, state, &ret_type);
 
                 state.pop();
 
@@ -578,6 +548,54 @@ fn parse(
                 assert_eq!(Some(Token::RBrace), tokens.next());
             }
 
+            Some(Token::Enum) => {
+                assert_eq!(Token::Enum, tokens.next().unwrap());
+
+                let Some(Token::Name(name)) = tokens.next() else {
+                    unimplemented!()
+                };
+
+                assert!(state.inprogress.insert(name.clone()));
+
+                let mut members = Vec::new();
+
+                assert_eq!(Some(Token::LBrace), tokens.next());
+
+                while Token::RBrace != *tokens.peek().unwrap() {
+                    let Token::Name(var_name) = tokens.next().unwrap() else {
+                        unimplemented!();
+                    };
+
+                    let var_type = if let Some(Token::LParens) = tokens.peek() {
+                        assert_eq!(Some(Token::LParens), tokens.next());
+                        let t = parse_type(tokens, state);
+                        assert_eq!(Some(Token::RParens), tokens.next());
+                        Some(t)
+                    } else {
+                        None
+                    };
+
+                    members.push((var_name, var_type));
+
+                    if Token::Comma == *tokens.peek().unwrap() {
+                        assert_eq!(Token::Comma, tokens.next().unwrap());
+                    }
+                }
+
+                assert!(state.inprogress.remove(&name));
+
+                assert!(
+                    state
+                        .enum_def
+                        .insert(name.clone(), members.clone())
+                        .is_none()
+                );
+
+                statements.push(Statement::EnumDefinition(name, members));
+
+                assert_eq!(Some(Token::RBrace), tokens.next());
+            }
+
             Some(Token::RBrace) | None => break,
 
             Some(Token::Ret) => {
@@ -641,9 +659,13 @@ fn parse_value(
 
                 let sig = state.get_sig(&name).unwrap();
 
-                let args = parse_function_call(tokens, state, sig);
+                let args = parse_function_call(
+                    tokens,
+                    state,
+                    &sig.instantiate(sig.type_names.as_slice(), &filled_types),
+                );
 
-                assert!(sig.matches(args.as_slice(), filled_types.as_slice()));
+                // assert!(sig.matches(args.as_slice(), filled_types.as_slice()));
 
                 TypedValue {
                     val_source: ValueSource::FunctionCall { name, args },
@@ -661,11 +683,11 @@ fn parse_value(
                     val_type: val_type.clone(),
                     val_source: ValueSource::Variable(name),
                 }
-            } else if let Some(_) = state.id_to_struct(&name) {
+            } else if let Some(struct_def) = state.id_to_struct(&name) {
                 // struct con
                 assert_eq!(Token::LBrace, tokens.next().unwrap());
 
-                let mut struct_def = state.id_to_struct(&name).unwrap().iter();
+                let mut struct_def_iter = struct_def.iter();
 
                 let mut struct_con = Vec::new();
 
@@ -674,7 +696,7 @@ fn parse_value(
                         unimplemented!()
                     };
 
-                    let struct_item = struct_def.next().unwrap();
+                    let struct_item = struct_def_iter.next().unwrap();
 
                     assert_eq!(&struct_item.0, &member_name);
 
@@ -689,7 +711,7 @@ fn parse_value(
                     }
                 }
 
-                assert!(struct_def.next().is_none());
+                assert!(struct_def_iter.next().is_none());
 
                 assert_eq!(Token::RBrace, tokens.next().unwrap());
 
@@ -702,8 +724,31 @@ fn parse_value(
                     val_type: Type::Function(Box::new(sig.clone())),
                     val_source: ValueSource::Function(name),
                 }
+            } else if let Some(enum_members) = state.enum_def.get(&name) {
+                assert_eq!(Token::Colon, tokens.next().unwrap());
+                assert_eq!(Token::Colon, tokens.next().unwrap());
+
+                let Token::Name(enum_member) = tokens.next().unwrap() else {
+                    unreachable!()
+                };
+
+                let enum_item = enum_members.iter().find(|x| x.0 == enum_member).unwrap();
+
+                let enum_value = if let Some(enum_type) = &enum_item.1 {
+                    assert_eq!(Token::LParens, tokens.next().unwrap());
+                    let t = Some(Box::new(parse_value(tokens, state, &enum_type)));
+                    assert_eq!(Token::RParens, tokens.next().unwrap());
+                    t
+                } else {
+                    None
+                };
+
+                TypedValue {
+                    val_type: Type::EnumName(String::from(name)),
+                    val_source: ValueSource::EnumConstruction(enum_member, enum_value),
+                }
             } else {
-                unimplemented!("{tokens:?}")
+                unimplemented!("{name} {tokens:?}")
             }
         }
 
@@ -739,12 +784,106 @@ fn parse_value(
             }
         }
 
+        Token::Match => {
+            assert_eq!(Token::LAngle, tokens.next().unwrap());
+
+            let match_type = parse_type(tokens, state);
+
+            // assert_eq!(Token::Comma, tokens.next().unwrap());
+            // let ret_type = parse_type(tokens, state);
+
+            assert_eq!(Token::RAngle, tokens.next().unwrap());
+
+            let val_to_match = parse_value(tokens, state, &match_type);
+
+            let Type::EnumName(enum_name) = match_type.clone() else {
+                unimplemented!()
+            };
+
+            let mut enum_def = state.enum_def.get(&enum_name).unwrap();
+
+            let mut match_arms = Vec::new();
+
+            assert_eq!(Token::LBrace, tokens.next().unwrap());
+
+            while Token::RBrace != *tokens.peek().unwrap() {
+                let Token::Name(enum_member) = tokens.next().unwrap() else {
+                    unimplemented!()
+                };
+
+                // TODO make sure all match branches are filled out
+
+                if let Some(enum_type) = &enum_def.iter().find(|x| &x.0 == &enum_member).unwrap().1
+                {
+                    assert_eq!(Token::LParens, tokens.next().unwrap());
+                    let Token::Name(var_name) = tokens.next().unwrap() else {
+                        unimplemented!()
+                    };
+                    assert_eq!(Token::RParens, tokens.next().unwrap());
+
+                    // =>
+                    assert_eq!(Token::Equals, tokens.next().unwrap());
+                    assert_eq!(Token::RAngle, tokens.next().unwrap());
+
+                    assert_eq!(Token::LBrace, tokens.next().unwrap());
+
+                    // TODO this should be a substate not a clone
+                    let mut sub_state = state.clone();
+
+                    assert!(
+                        sub_state
+                            .states
+                            .last_mut()
+                            .unwrap()
+                            .var_to_id
+                            .insert(var_name.clone(), enum_type.clone())
+                            .is_none()
+                    );
+
+                    let statements = parse(tokens, &mut sub_state, target_type);
+
+                    assert_eq!(Token::RBrace, tokens.next().unwrap());
+
+                    match_arms.push((enum_member, Some(var_name), statements));
+                } else {
+                    assert_eq!(Token::Equals, tokens.next().unwrap());
+                    assert_eq!(Token::RAngle, tokens.next().unwrap());
+
+                    assert_eq!(Token::LBrace, tokens.next().unwrap());
+
+                    let statements = parse(tokens, &mut state.clone(), target_type);
+
+                    assert_eq!(Token::RBrace, tokens.next().unwrap());
+                    match_arms.push((enum_member, None, statements));
+                };
+
+                match tokens.peek().unwrap() {
+                    Token::Comma => {
+                        assert_eq!(tokens.next().unwrap(), Token::Comma);
+                    }
+
+                    Token::RBrace => {}
+                    _ => unimplemented!(),
+                }
+            }
+
+            assert_eq!(Token::RBrace, tokens.next().unwrap());
+
+            TypedValue {
+                val_type: target_type.clone(),
+                val_source: ValueSource::Match(Box::new(val_to_match), match_arms),
+            }
+        }
+
         x => {
             dbg!(tokens);
             todo!("{x:?}");
         }
     };
 
+    // TODO remove this
+    // fundementally does not work with target type
+    // or rework how targets work
     loop {
         let updated = if let Token::Minus | Token::Plus = tokens.peek().unwrap() {
             let op = tokens.next().unwrap();
