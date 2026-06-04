@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::iter::Peekable;
 use std::vec::IntoIter;
 
@@ -10,6 +10,7 @@ enum Token {
     Fun,
     Ret,
     Struct,
+    Enum,
 
     Number(isize),
 
@@ -36,7 +37,7 @@ pub fn dew_it(file: &str) -> Vec<Statement> {
     parse(
         &mut dbg!(tokenize(file)).into_iter().peekable(),
         &mut State::new(),
-        TypeId::NONE,
+        Type::None,
     )
 }
 
@@ -63,6 +64,7 @@ fn tokenize(file: &str) -> Vec<Token> {
                     "fun" => Token::Fun,
                     "ret" => Token::Ret,
                     "struct" => Token::Struct,
+                    "enum" => Token::Enum,
 
                     _ => Token::Name(string),
                 });
@@ -114,27 +116,28 @@ pub enum Statement {
 
     VarDefinition(String, TypedValue),
     FunDefinition(String, FunDefinition),
-    StructDefinition(String, Vec<(String, TypeId)>),
 
+    StructDefinition(String, Vec<(String, Type)>),
+    // EnumDefinition(String, Vec<(String, Type)>),
     Ret(TypedValue),
 }
 
 #[derive(Debug, Clone)]
 pub struct FunDefinition {
-    pub args: Vec<(String, TypeId)>,
+    pub args: Vec<(String, Type)>,
     pub statements: Vec<Statement>,
-    pub type_params: Vec<TypeId>,
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct TypedValue {
-    pub val_type: TypeId,
+    pub val_type: Type,
     pub val_source: ValueSource,
 }
 
 #[derive(Debug, Clone)]
 pub enum ValueSource {
-    Function { name: String, args: Vec<TypedValue> },
+    FunctionCall { name: String, args: Vec<TypedValue> },
 
     StructConstruction(Vec<(String, TypedValue)>),
     MemberAccess { name: String, item: Box<TypedValue> },
@@ -143,152 +146,247 @@ pub enum ValueSource {
     ListLiteral(Vec<TypedValue>),
 
     Variable(String),
+    Function(String),
     None,
 }
 
-#[derive(PartialEq, Eq, Hash, Debug, Clone, Copy)]
-pub struct TypeId(usize);
-
-impl TypeId {
-    const NONE: TypeId = TypeId(0);
-    const INT: TypeId = TypeId(1);
-}
-
 #[derive(PartialEq, Eq, Hash, Debug, Clone)]
-enum Type {
-    List(TypeId),
+pub enum Type {
+    Int,
+    None,
+
+    List(Box<Type>),
+    StructName(String),
+    Function(Box<Sig>),
+
+    TypeVar(String),
 }
 
 impl Type {
     fn is_list(&self) -> bool {
         match self {
-            Type::List(type_id) => true,
+            Type::List(_) => true,
             _ => false,
+        }
+    }
+
+    fn instantiate(&self, type_names: &[String], types: &[Type]) -> Type {
+        match self {
+            Type::List(x) => Type::List(Box::new(x.instantiate(type_names, types))),
+            t @ Type::TypeVar(x) => {
+                if let Some(new_type) = type_names.iter().position(|y| x == y) {
+                    types[new_type].clone()
+                } else {
+                    t.clone()
+                }
+            }
+            t @ (Type::Int | Type::None | Type::StructName(_)) => t.clone(),
+            Type::Function(sig) => Type::Function(Box::new(sig.instantiate(type_names, types))),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 struct Sig {
-    args: Vec<TypeId>,
-    type_params: Vec<TypeId>,
-    ret_type: TypeId,
+    args: Vec<Type>,
+    ret_type: Type,
+    type_names: Vec<String>,
 }
 
 impl Sig {
-    fn matches(&self, args: &mut impl Iterator<Item = TypeId>) -> bool {
-        let mut expected_args = self.args.iter();
+    fn matches(&self, args: &[TypedValue], type_params: &[Type]) -> bool {
+        let mut expected_args = self
+            .args
+            .iter()
+            .map(|x| x.instantiate(&self.type_names, type_params));
+
+        let mut args_iter = args.iter().map(|x| &x.val_type);
 
         loop {
-            if let Some(arg) = args.next() {
-                assert_eq!(arg, *expected_args.next().unwrap());
+            if let Some(arg) = args_iter.next() {
+                assert_eq!(arg, &expected_args.next().unwrap());
             } else {
                 assert!(expected_args.next().is_none());
                 return true;
             }
         }
     }
+
+    fn instantiate(&self, type_names: &[String], types: &[Type]) -> Sig {
+        Sig {
+            args: self
+                .args
+                .iter()
+                .map(|x| x.instantiate(type_names, types))
+                .collect(),
+            ret_type: self.ret_type.instantiate(type_names, types),
+            type_names: self.type_names.clone(),
+        }
+    }
 }
 
 #[derive(Default, Debug)]
 pub struct SubState {
-    var_to_id: HashMap<String, TypeId>,
+    var_to_id: HashMap<String, Type>,
+    type_params: HashSet<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct State {
     states: Vec<SubState>,
 
-    // var types
-    name_to_id: HashMap<String, TypeId>,
-
     // functions
     function_to_sig: HashMap<String, Sig>,
 
     // structs
-    struct_def: HashMap<TypeId, Vec<(String, TypeId)>>,
+    struct_def: HashMap<String, Vec<(String, Type)>>,
 
-    // types
-    types_to_id: HashMap<Type, TypeId>,
-    id_to_type: HashMap<TypeId, Type>,
-
-    curr_type: usize,
+    // inprogress types
+    inprogress: HashSet<String>,
 }
 
 impl State {
     fn new() -> Self {
-        State {
+        let mut state = State {
             states: vec![SubState {
                 ..Default::default()
             }],
-            curr_type: 2,
+            function_to_sig: {
+                let mut hash = HashMap::new();
 
-            ..Default::default()
-        }
-    }
-
-    fn name_to_id(&self, name: &str) -> Option<TypeId> {
-        match name {
-            _ => self.name_to_id.get(name).copied(),
-        }
-    }
-
-    fn var_to_id(&self, name: &str) -> Option<TypeId> {
-        self.states
-            .iter()
-            .rev()
-            .find_map(|x| x.var_to_id.get(name))
-            .copied()
-    }
-
-    fn func_sig_to_ret(
-        &self,
-        name: &str,
-        types: &mut impl Iterator<Item = TypeId>,
-    ) -> Option<TypeId> {
-        match name {
-            "index" => {
-                // assert_eq!(types.next().unwrap(), TypeId::LIST);
-                assert!(
-                    self.id_to_type
-                        .get(&types.next().unwrap())
-                        .unwrap()
-                        .is_list()
+                hash.insert(
+                    String::from("add"),
+                    Sig {
+                        args: vec![Type::Int, Type::Int],
+                        ret_type: Type::Int,
+                        type_names: Vec::new(),
+                    },
                 );
-                assert_eq!(types.next().unwrap(), TypeId::INT);
-                assert!(types.next().is_none());
-                Some(TypeId::INT)
-            }
 
-            "add" => {
-                assert_eq!(types.next().unwrap(), TypeId::INT);
-                assert_eq!(types.next().unwrap(), TypeId::INT);
-                assert!(types.next().is_none());
-                Some(TypeId::INT)
-            }
+                hash.insert(
+                    String::from("subtract"),
+                    Sig {
+                        args: vec![Type::Int, Type::Int],
+                        ret_type: Type::Int,
+                        type_names: Vec::new(),
+                    },
+                );
 
-            "subtract" => {
-                assert_eq!(types.next().unwrap(), TypeId::INT);
-                assert_eq!(types.next().unwrap(), TypeId::INT);
-                assert!(types.next().is_none());
-                Some(TypeId::INT)
-            }
+                hash.insert(
+                    String::from("index"),
+                    Sig {
+                        args: vec![
+                            Type::List(Box::new(Type::TypeVar(String::from("IndexType")))),
+                            Type::Int,
+                        ],
+                        ret_type: Type::TypeVar(String::from("IndexType")),
+                        type_names: vec![String::from("IndexType")],
+                    },
+                );
 
-            "print" => Some(TypeId::NONE),
+                hash.insert(
+                    String::from("print"),
+                    Sig {
+                        args: vec![Type::TypeVar(String::from("PrintType"))],
+                        ret_type: Type::None,
+                        type_names: vec![String::from("PrintType")],
+                    },
+                );
 
-            _ => {
-                if let Some(sig) = self.function_to_sig.get(name) {
-                    assert!(sig.matches(types));
-                    Some(sig.ret_type)
-                } else {
-                    None
-                }
-            }
+                hash
+            },
+            ..Default::default()
+        };
+
+        state
+    }
+
+    fn var_to_id(&self, name: &str) -> Option<&Type> {
+        self.states.iter().rev().find_map(|x| x.var_to_id.get(name))
+    }
+
+    fn get_sig(&self, name: &str) -> Option<&Sig> {
+        if let Some(sig) = self.function_to_sig.get(name) {
+            Some(sig)
+        } else if let Some(Type::Function(sig)) = self.var_to_id(name) {
+            Some(sig)
+        } else {
+            None
         }
     }
 
-    fn id_to_struct(&self, id: TypeId) -> Option<&[(String, TypeId)]> {
-        self.struct_def.get(&id).map(|y| y.as_slice())
+    // fn func_sig_to_ret(
+    //     &self,
+    //     name: &str,
+    //     params: &mut impl Iterator<Item = Type>,
+    //     type_params: &[Type],
+    // ) -> Option<Type> {
+    //     match name {
+    //         "index" => {
+    //             // assert_eq!(types.next().unwrap(), Type::LIST);
+    //             let Type::List(list_type) = params.next().unwrap() else {
+    //                 unimplemented!()
+    //             };
+    //             assert_eq!(params.next().unwrap(), Type::Int);
+    //             assert!(params.next().is_none());
+    //             Some(*list_type)
+    //         }
+    //
+    //         "add" => {
+    //             assert_eq!(params.next().unwrap(), Type::Int);
+    //             assert_eq!(params.next().unwrap(), Type::Int);
+    //             assert!(params.next().is_none());
+    //             Some(Type::Int)
+    //         }
+    //
+    //         "subtract" => {
+    //             assert_eq!(params.next().unwrap(), Type::Int);
+    //             assert_eq!(params.next().unwrap(), Type::Int);
+    //             assert!(params.next().is_none());
+    //             Some(Type::Int)
+    //         }
+    //
+    //         "print" => Some(Type::None),
+    //
+    //         _ => {
+    //             dbg!(name);
+    //             if let Some(sig) = self.function_to_sig.get(name) {
+    //                 assert!(sig.matches(params, type_params));
+    //
+    //                 if !type_params.is_empty() {
+    //                     Some(sig.ret_type.instantiate(&sig.type_names, type_params))
+    //                 } else {
+    //                     Some(sig.ret_type.clone())
+    //                 }
+    //             } else if let Some(Type::Function(sig)) = self.var_to_id(name) {
+    //                 assert!(sig.matches(params, type_params));
+    //
+    //                 if !type_params.is_empty() {
+    //                     Some(sig.ret_type.instantiate(&sig.type_names, type_params))
+    //                 } else {
+    //                     Some(sig.ret_type.clone())
+    //                 }
+    //             } else {
+    //                 None
+    //             }
+    //         }
+    //     }
+    // }
+
+    fn id_to_struct(&self, struct_name: &str) -> Option<&[(String, Type)]> {
+        self.struct_def.get(struct_name).map(|y| y.as_slice())
+    }
+
+    fn name_to_type(&self, type_name: &str) -> Option<Type> {
+        if self.struct_def.get(type_name).is_some() {
+            Some(Type::StructName(String::from(type_name)))
+        } else if self.states.last().unwrap().type_params.contains(type_name) {
+            Some(Type::TypeVar(String::from(type_name)))
+        } else if self.inprogress.contains(type_name) {
+            Some(Type::StructName(String::from(type_name)))
+        } else {
+            None
+        }
     }
 
     fn push(&mut self) {
@@ -298,39 +396,17 @@ impl State {
     fn pop(&mut self) -> SubState {
         self.states.pop().unwrap()
     }
-
-    fn add_struct_name(&mut self, str: String) -> TypeId {
-        let id = TypeId(self.curr_type);
-        self.curr_type += 1;
-
-        assert!(self.name_to_id.insert(str, id).is_none());
-
-        id
-    }
-
-    fn get_or_add_type(&mut self, ty: Type) -> TypeId {
-        if let Some(type_id) = self.types_to_id.get(&ty) {
-            *type_id
-        } else {
-            let id = TypeId(self.curr_type);
-            self.curr_type += 1;
-
-            assert!(self.types_to_id.insert(ty.clone(), id).is_none());
-            assert!(self.id_to_type.insert(id, ty).is_none());
-
-            id
-        }
-    }
 }
 
 fn parse(
     tokens: &mut Peekable<IntoIter<Token>>,
     state: &mut State,
-    ret_type: TypeId,
+    ret_type: Type,
 ) -> Vec<Statement> {
     let mut statements = Vec::new();
 
     loop {
+        dbg!(&statements);
         match tokens.peek() {
             Some(Token::Let) => {
                 assert_eq!(Some(Token::Let), tokens.next());
@@ -339,13 +415,23 @@ fn parse(
                     unimplemented!()
                 };
 
+                assert_eq!(Some(Token::Colon), tokens.next());
+
+                let val_type = parse_type(tokens, state);
+
                 assert_eq!(Some(Token::Equals), tokens.next());
 
-                let value = parse_value(tokens, state);
+                let value = parse_value(tokens, state, &val_type);
 
-                let substate = state.states.last_mut().unwrap();
-
-                substate.var_to_id.insert(name.clone(), value.val_type);
+                assert!(
+                    state
+                        .states
+                        .last_mut()
+                        .unwrap()
+                        .var_to_id
+                        .insert(name.clone(), value.val_type.clone())
+                        .is_none()
+                );
 
                 statements.push(Statement::VarDefinition(name, value));
             }
@@ -353,7 +439,6 @@ fn parse(
             Some(Token::Fun) => {
                 assert_eq!(Some(Token::Fun), tokens.next());
 
-                let mut string_params = Vec::new();
                 let mut type_params = Vec::new();
 
                 // get type_params
@@ -365,9 +450,7 @@ fn parse(
                             unimplemented!()
                         };
 
-                        type_params.push(state.add_struct_name(param.clone()));
-
-                        string_params.push(param);
+                        type_params.push(param);
 
                         if Token::Comma == *tokens.peek().unwrap() {
                             assert_eq!(Token::Comma, tokens.next().unwrap());
@@ -377,9 +460,15 @@ fn parse(
                     assert_eq!(Token::RAngle, tokens.next().unwrap());
                 }
 
-                // get inputs and outputs
+                state.push();
 
-                let ret = parse_type(tokens, state);
+                let hash_set = &mut state.states.last_mut().unwrap().type_params;
+
+                for param in &type_params {
+                    assert!(hash_set.insert(param.clone()));
+                }
+
+                let ret_type = parse_type(tokens, state);
 
                 let Some(Token::Name(name)) = tokens.next() else {
                     unimplemented!()
@@ -389,8 +478,6 @@ fn parse(
 
                 let mut args = Vec::new();
 
-                state.push();
-
                 while *tokens.peek().unwrap() != Token::RParens {
                     let arg_type = parse_type(tokens, state);
 
@@ -398,7 +485,7 @@ fn parse(
                         unimplemented!()
                     };
 
-                    args.push((arg.clone(), arg_type));
+                    args.push((arg.clone(), arg_type.clone()));
 
                     assert!(
                         state
@@ -406,7 +493,7 @@ fn parse(
                             .last_mut()
                             .unwrap()
                             .var_to_id
-                            .insert(arg, arg_type.clone())
+                            .insert(arg, arg_type)
                             .is_none()
                     );
 
@@ -421,27 +508,24 @@ fn parse(
 
                 assert_eq!(Some(Token::LBrace), tokens.next());
 
-                let func_statements = parse(tokens, state, ret);
+                let func_statements = parse(tokens, state, ret_type.clone());
 
                 state.pop();
 
                 assert_eq!(Some(Token::RBrace), tokens.next());
 
                 let arg_args = Sig {
-                    args: args.iter().map(|x| x.1).collect(),
-                    type_params,
+                    args: args.iter().map(|x| x.1.clone()).collect(),
+                    type_names: type_params.clone(),
+                    ret_type: ret_type.clone(),
                 };
 
                 assert!(
                     state
                         .function_to_sig
-                        .insert(name.clone(), (ret, arg_args))
+                        .insert(name.clone(), arg_args)
                         .is_none()
                 );
-
-                for param in string_params {
-                    assert!(state.name_to_id.remove(&param).is_some());
-                }
 
                 statements.push(Statement::FunDefinition(
                     name,
@@ -453,26 +537,18 @@ fn parse(
                 ));
             }
 
-            Some(Token::Ret) => {
-                assert_eq!(Some(Token::Ret), tokens.next());
-
-                let value = parse_value(tokens, state);
-
-                assert_eq!(value.val_type, ret_type);
-
-                statements.push(Statement::Ret(value));
-            }
-
             Some(Token::Struct) => {
                 assert_eq!(Some(Token::Struct), tokens.next());
 
-                let Token::Name(name) = tokens.next().unwrap() else {
+                let Some(Token::Name(name)) = tokens.next() else {
                     unimplemented!()
                 };
 
-                assert_eq!(Some(Token::LBrace), tokens.next());
+                assert!(state.inprogress.insert(name.clone()));
 
                 let mut members = Vec::new();
+
+                assert_eq!(Some(Token::LBrace), tokens.next());
 
                 while Token::RBrace != *tokens.peek().unwrap() {
                     let var_type = parse_type(tokens, state);
@@ -488,9 +564,14 @@ fn parse(
                     }
                 }
 
-                let id = state.add_struct_name(name.clone());
+                assert!(state.inprogress.remove(&name));
 
-                assert!(state.struct_def.insert(id, members.clone()).is_none());
+                assert!(
+                    state
+                        .struct_def
+                        .insert(name.clone(), members.clone())
+                        .is_none()
+                );
 
                 statements.push(Statement::StructDefinition(name, members));
 
@@ -499,10 +580,20 @@ fn parse(
 
             Some(Token::RBrace) | None => break,
 
-            Some(_) => {
-                let value = parse_value(tokens, state);
+            Some(Token::Ret) => {
+                assert_eq!(Token::Ret, tokens.next().unwrap());
 
-                assert_eq!(value.val_type, TypeId::NONE);
+                let val = parse_value(tokens, state, &ret_type);
+
+                // assert_eq!(val.val_type, ret_type);
+
+                statements.push(Statement::Ret(val))
+            }
+
+            Some(_) => {
+                let value = parse_value(tokens, state, &Type::None);
+
+                assert_eq!(value.val_type, Type::None);
 
                 statements.push(Statement::Value(value));
             }
@@ -514,19 +605,24 @@ fn parse(
     statements
 }
 
-fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> TypedValue {
+// this currently will fail if we do something stupid like [[1, 2, 3]][0]
+fn parse_value(
+    tokens: &mut Peekable<IntoIter<Token>>,
+    state: &State,
+    target_type: &Type,
+) -> TypedValue {
     let mut first_val = match tokens.next().unwrap() {
         Token::Name(name) => {
             if let Some(Token::LParens) = tokens.peek() {
-                let args = parse_function_call(tokens, state);
+                let sig = state.get_sig(&name).unwrap().clone();
 
-                let ret = state
-                    .func_sig_to_ret(&name, &mut args.iter().map(|x| x.val_type))
-                    .unwrap();
+                let args = parse_function_call(tokens, state, &sig);
+
+                assert!(sig.matches(args.as_slice(), &[]));
 
                 TypedValue {
-                    val_source: ValueSource::Function { name, args },
-                    val_type: ret,
+                    val_source: ValueSource::FunctionCall { name, args },
+                    val_type: sig.ret_type,
                 }
             } else if let Some(Token::LAngle) = tokens.peek() {
                 assert_eq!(Token::LAngle, tokens.next().unwrap());
@@ -543,23 +639,33 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
 
                 assert_eq!(tokens.next().unwrap(), Token::RAngle);
 
-                let args = parse_function_call(tokens, state);
+                let sig = state.get_sig(&name).unwrap();
 
-                let ret = state
-                    .func_sig_to_ret(&name, &mut args.iter().map(|x| x.val_type))
-                    .unwrap();
+                let args = parse_function_call(tokens, state, sig);
+
+                assert!(sig.matches(args.as_slice(), filled_types.as_slice()));
 
                 TypedValue {
-                    val_source: ValueSource::Function { name, args },
-                    val_type: ret,
+                    val_source: ValueSource::FunctionCall { name, args },
+                    val_type: sig.ret_type.clone(),
                 }
+
+                // let args = parse_function_call(tokens, state);
+                //
+                // TypedValue {
+                //     val_source: ValueSource::FunctionCall { name, args },
+                //     val_type: ret,
+                // }
             } else if let Some(val_type) = state.var_to_id(&name) {
                 TypedValue {
-                    val_type,
+                    val_type: val_type.clone(),
                     val_source: ValueSource::Variable(name),
                 }
-            } else if let Some(type_con) = state.name_to_id(&name) {
+            } else if let Some(_) = state.id_to_struct(&name) {
+                // struct con
                 assert_eq!(Token::LBrace, tokens.next().unwrap());
+
+                let mut struct_def = state.id_to_struct(&name).unwrap().iter();
 
                 let mut struct_con = Vec::new();
 
@@ -568,9 +674,13 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
                         unimplemented!()
                     };
 
+                    let struct_item = struct_def.next().unwrap();
+
+                    assert_eq!(&struct_item.0, &member_name);
+
                     assert_eq!(Token::Colon, tokens.next().unwrap());
 
-                    let value = parse_value(tokens, state);
+                    let value = parse_value(tokens, state, &struct_item.1);
 
                     struct_con.push((member_name, value));
 
@@ -579,26 +689,18 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
                     }
                 }
 
-                let mut struct_def = state.id_to_struct(type_con).unwrap().iter();
-                let mut struct_con_iter = struct_con.iter();
-
-                // TODO this could be better
-                loop {
-                    match (struct_def.next(), struct_con_iter.next()) {
-                        (Some(x), Some(y)) => {
-                            assert_eq!(x.0, y.0);
-                            assert_eq!(x.1, y.1.val_type);
-                        }
-                        (None, None) => break,
-                        _ => unimplemented!(),
-                    }
-                }
+                assert!(struct_def.next().is_none());
 
                 assert_eq!(Token::RBrace, tokens.next().unwrap());
 
                 TypedValue {
-                    val_type: type_con,
+                    val_type: Type::StructName(name),
                     val_source: ValueSource::StructConstruction(struct_con),
+                }
+            } else if let Some(sig) = state.function_to_sig.get(&name) {
+                TypedValue {
+                    val_type: Type::Function(Box::new(sig.clone())),
+                    val_source: ValueSource::Function(name),
                 }
             } else {
                 unimplemented!("{tokens:?}")
@@ -606,17 +708,21 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
         }
 
         Token::Number(x) => TypedValue {
-            val_type: TypeId::INT,
+            val_type: Type::Int,
             val_source: ValueSource::NumberLiteral(x),
         },
 
         Token::LBracket => {
             let mut values = Vec::new();
 
-            while Token::RBracket != *tokens.peek().unwrap() {
-                let value = parse_value(tokens, state);
+            let Type::List(item_type) = target_type else {
+                unimplemented!()
+            };
 
-                // assert_eq!(value.val_type, TypeId::INT);
+            while Token::RBracket != *tokens.peek().unwrap() {
+                let value = parse_value(tokens, state, item_type);
+
+                // assert_eq!(value.val_type, Type::Int);
 
                 values.push(value);
 
@@ -627,12 +733,9 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
 
             assert_eq!(Token::RBracket, tokens.next().unwrap());
 
-            let list_type = values.first().unwrap().val_type;
-            assert!(values.iter().all(|x| x.val_type == list_type));
-
             TypedValue {
                 val_source: ValueSource::ListLiteral(values),
-                val_type: state.get_or_add_type(Type::List(list_type)),
+                val_type: target_type.clone(),
             }
         }
 
@@ -652,42 +755,43 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
                 _ => unreachable!(),
             };
 
-            let args = vec![first_val, parse_value(tokens, state)];
+            let args = vec![first_val, parse_value(tokens, state, &Type::Int)];
 
-            assert_eq!(args[0].val_type, TypeId::INT);
-            assert_eq!(args[1].val_type, TypeId::INT);
+            assert_eq!(args[0].val_type, Type::Int);
+            assert_eq!(args[1].val_type, Type::Int);
 
             TypedValue {
-                val_source: ValueSource::Function { name, args },
-                val_type: TypeId::INT,
+                val_source: ValueSource::FunctionCall { name, args },
+                val_type: Type::Int,
             }
         } else if Token::LBracket == *tokens.peek().unwrap() {
             assert_eq!(Token::LBracket, tokens.next().unwrap());
 
-            let Type::List(sub_type) = state.id_to_type.get(&first_val.val_type).unwrap() else {
+            let Type::List(sub_type) = &first_val.val_type else {
                 unimplemented!()
             };
 
-            let sub_type = *sub_type;
-
-            let value = parse_value(tokens, state);
+            let value = parse_value(tokens, state, &Type::Int);
 
             assert_eq!(Token::RBracket, tokens.next().unwrap());
 
             TypedValue {
-                val_source: ValueSource::Function {
+                val_source: ValueSource::FunctionCall {
                     name: String::from("index"),
-                    args: vec![first_val, value],
+                    args: vec![first_val.clone(), value],
                 },
-                val_type: sub_type,
+                val_type: *sub_type.clone(),
             }
         } else if Token::Dot == *tokens.peek().unwrap() {
             assert_eq!(Token::Dot, tokens.next().unwrap());
 
             let TypedValue {
-                val_type,
+                val_type: Type::StructName(struct_name),
                 val_source: _,
-            } = &first_val;
+            } = &first_val
+            else {
+                unimplemented!()
+            };
 
             let Token::Name(name) = tokens.next().unwrap() else {
                 unimplemented!()
@@ -695,18 +799,21 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
 
             TypedValue {
                 val_type: state
-                    .id_to_struct(*val_type)
+                    .id_to_struct(struct_name)
                     .unwrap()
                     .iter()
                     .find(|x| x.0 == name)
                     .unwrap()
-                    .1,
+                    .1
+                    .clone(),
                 val_source: ValueSource::MemberAccess {
                     name,
                     item: Box::new(first_val),
                 },
             }
         } else {
+            assert_eq!(&first_val.val_type, target_type);
+
             return first_val;
         };
 
@@ -714,34 +821,72 @@ fn parse_value(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> Typ
     }
 }
 
-fn parse_type(tokens: &mut Peekable<IntoIter<Token>>, state: &mut State) -> TypeId {
+fn parse_type(tokens: &mut Peekable<IntoIter<Token>>, state: &State) -> Type {
     match tokens.next().unwrap() {
-        Token::Name(name) if name == "none" => TypeId::NONE,
-        Token::Name(name) if name == "int" => TypeId::INT,
-        Token::Name(name) => state.name_to_id(&name).unwrap(),
+        Token::Name(name) if name == "none" => Type::None,
+        Token::Name(name) if name == "int" => Type::Int,
+        Token::Name(name) => state
+            .name_to_type(&name)
+            .unwrap_or_else(|| panic!("{name}")),
 
         Token::LBracket => {
             let sub_type = parse_type(tokens, state);
 
             assert_eq!(tokens.next().unwrap(), Token::RBracket);
 
-            state.get_or_add_type(Type::List(sub_type))
+            Type::List(Box::new(sub_type))
         }
 
-        _ => todo!(),
+        Token::LParens => {
+            let mut args = Vec::new();
+
+            while *tokens.peek().unwrap() != Token::RParens {
+                args.push(parse_type(tokens, state));
+
+                match tokens.peek().unwrap() {
+                    Token::Comma => {
+                        assert_eq!(tokens.next(), Some(Token::Comma));
+                    }
+
+                    Token::RParens => {}
+
+                    _ => unimplemented!(),
+                }
+            }
+
+            assert_eq!(tokens.next().unwrap(), Token::RParens);
+
+            assert_eq!(tokens.next().unwrap(), Token::Minus);
+            assert_eq!(tokens.next().unwrap(), Token::RAngle);
+
+            let ret_type = parse_type(tokens, state);
+
+            // TODO
+
+            Type::Function(Box::new(Sig {
+                args,
+                ret_type,
+                type_names: Vec::new(),
+            }))
+        }
+
+        x => unimplemented!("{x:?}"),
     }
 }
 
 fn parse_function_call(
     tokens: &mut Peekable<IntoIter<Token>>,
-    state: &mut State,
+    state: &State,
+    sig: &Sig,
 ) -> Vec<TypedValue> {
     let mut args = Vec::new();
 
     assert_eq!(tokens.next(), Some(Token::LParens));
 
+    let mut items = sig.args.iter();
+
     while *tokens.peek().unwrap() != Token::RParens {
-        args.push(parse_value(tokens, state));
+        args.push(parse_value(tokens, state, items.next().unwrap()));
 
         match tokens.peek().unwrap() {
             Token::Comma => {
@@ -754,6 +899,7 @@ fn parse_function_call(
         }
     }
 
+    assert!(items.next().is_none());
     assert_eq!(tokens.next(), Some(Token::RParens));
 
     args

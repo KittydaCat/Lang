@@ -13,6 +13,7 @@ enum RuntimeValue {
 enum RuntimeObject {
     List(Vec<RuntimeValue>),
     Struct(Vec<(String, RuntimeValue)>),
+    Function(String),
 }
 
 #[derive(Eq, Hash, Clone, Copy, Debug, PartialEq)]
@@ -20,7 +21,7 @@ struct RuntimeID(usize);
 
 #[derive(Clone, Default)]
 struct State {
-    functions: HashMap<String, Function>,
+    functions: HashMap<String, FunDefinition>,
 
     vars: HashMap<String, RuntimeValue>,
 
@@ -41,12 +42,6 @@ impl State {
     }
 }
 
-#[derive(Clone)]
-enum Function {
-    Defined(FunDefinition),
-    // Constructor,
-}
-
 pub fn top_level_exec(statements: &Vec<Statement>) {
     assert_eq!(exec(statements, State::default()), RuntimeValue::None);
 }
@@ -63,24 +58,10 @@ fn exec(statements: &Vec<Statement>, mut state: State) -> RuntimeValue {
                 assert!(state.vars.insert(name.clone(), val).is_none())
             }
             Statement::FunDefinition(name, def) => {
-                assert!(
-                    state
-                        .functions
-                        .insert(name.clone(), Function::Defined(def.clone()))
-                        .is_none()
-                );
+                assert!(state.functions.insert(name.clone(), def.clone()).is_none());
             }
             Statement::Ret(value) => return calc_value(value, &mut state),
-            Statement::StructDefinition(name, members) => {
-                // TODO
-
-                // assert!(
-                //     state
-                //         .functions
-                //         .insert(name.clone(), Function::Constructor)
-                //         .is_none()
-                // );
-            }
+            Statement::StructDefinition(name, members) => {}
         }
     }
 
@@ -89,7 +70,7 @@ fn exec(statements: &Vec<Statement>, mut state: State) -> RuntimeValue {
 
 fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
     match &value.val_source {
-        ValueSource::Function { name, args } => {
+        ValueSource::FunctionCall { name, args } => {
             let mut args: Vec<_> = args.iter().map(|x| calc_value(x, state)).collect();
 
             match name.as_str() {
@@ -136,29 +117,33 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
                 }
 
                 func => {
-                    let fun = state
-                        .functions
-                        .get(func)
-                        .unwrap_or_else(|| panic!("{func}"));
+                    // TODO
+                    let func = if let Some(fun) = state.functions.get(func) {
+                        fun
+                    } else if let Some(RuntimeValue::Object(id)) = state.vars.get(func) {
+                        let RuntimeObject::Function(fun) = state.values.get(id).unwrap() else {
+                            unimplemented!()
+                        };
 
-                    match fun {
-                        Function::Defined(fun_definition) => {
-                            let mut new_state = state.clone();
+                        state.functions.get(fun).unwrap()
+                    } else {
+                        unimplemented!()
+                    };
 
-                            let mut arg_names = fun_definition.args.iter();
-                            let mut args_vals = args.into_iter();
+                    let mut new_state = state.clone();
 
-                            while let (Some(arg), Some(val)) = (arg_names.next(), args_vals.next())
-                            {
-                                assert!(new_state.vars.insert(arg.0.clone(), val).is_none());
-                            }
+                    let mut arg_names = func.args.iter();
+                    let mut args_vals = args.into_iter();
 
-                            exec(&fun_definition.statements, new_state)
-                        } // Function::Constructor => state.add_object(RuntimeObject::Struct(args)),
+                    while let (Some(arg), Some(val)) = (arg_names.next(), args_vals.next()) {
+                        assert!(new_state.vars.insert(arg.0.clone(), val).is_none());
                     }
+
+                    exec(&func.statements, new_state)
                 }
             }
         }
+
         ValueSource::NumberLiteral(x) => RuntimeValue::Number(*x),
         ValueSource::Variable(name) => *state.vars.get(name).unwrap(),
         ValueSource::None => RuntimeValue::None,
@@ -186,5 +171,6 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
 
             state.add_object(RuntimeObject::Struct(struc))
         }
+        ValueSource::Function(x) => state.add_object(RuntimeObject::Function(x.clone())),
     }
 }
