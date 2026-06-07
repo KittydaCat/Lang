@@ -43,25 +43,30 @@ impl State {
     }
 }
 
-pub fn top_level_exec(statements: &Vec<Statement>) {
-    assert_eq!(exec(statements, &mut State::default()), RuntimeValue::None);
+pub trait IO: std::fmt::Write {}
+
+pub fn top_level_exec(statements: &Vec<Statement>, io: &mut impl IO) {
+    assert_eq!(
+        exec(statements, &mut State::default(), io),
+        RuntimeValue::None
+    );
 }
 
-fn exec(statements: &Vec<Statement>, mut state: &mut State) -> RuntimeValue {
+fn exec(statements: &Vec<Statement>, mut state: &mut State, io: &mut impl IO) -> RuntimeValue {
     for statement in statements {
         match statement {
             Statement::Value(value) => {
-                assert_eq!(RuntimeValue::None, calc_value(value, &mut state))
+                assert_eq!(RuntimeValue::None, calc_value(value, &mut state, io))
             }
             Statement::VarDefinition(name, value) => {
-                let val = calc_value(value, &mut state);
+                let val = calc_value(value, &mut state, io);
 
                 assert!(state.vars.insert(name.clone(), val).is_none())
             }
             Statement::FunDefinition(name, def) => {
                 assert!(state.functions.insert(name.clone(), def.clone()).is_none());
             }
-            Statement::Ret(value) => return calc_value(value, &mut state),
+            Statement::Ret(value) => return calc_value(value, &mut state, io),
             Statement::StructDefinition(name, members) => {}
             Statement::EnumDefinition(name, members) => {}
         }
@@ -70,19 +75,20 @@ fn exec(statements: &Vec<Statement>, mut state: &mut State) -> RuntimeValue {
     RuntimeValue::None
 }
 
-fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
+fn calc_value(value: &TypedValue, state: &mut State, io: &mut impl IO) -> RuntimeValue {
     match &value.val_source {
         ValueSource::FunctionCall { name, args } => {
-            let mut args: Vec<_> = args.iter().map(|x| calc_value(x, state)).collect();
+            let mut args: Vec<_> = args.iter().map(|x| calc_value(x, state, io)).collect();
 
             match name.as_str() {
                 "print" => {
                     for x in args {
                         match x {
-                            RuntimeValue::Number(num) => print!("{num}"),
+                            RuntimeValue::Number(num) => write!(io, "{num}").unwrap(),
                             RuntimeValue::Object(id) => {
-                                print!("{:?}", state.values.get(&id).unwrap())
+                                write!(io, "{:?}", state.values.get(&id).unwrap()).unwrap()
                             }
+
                             RuntimeValue::None => todo!(),
                         }
                     }
@@ -141,7 +147,7 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
                         assert!(new_state.vars.insert(arg.0.clone(), val).is_none());
                     }
 
-                    exec(&func.statements, &mut new_state)
+                    exec(&func.statements, &mut new_state, io)
                 }
             }
         }
@@ -150,12 +156,12 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
         ValueSource::Variable(name) => *state.vars.get(name).unwrap(),
         ValueSource::None => RuntimeValue::None,
         ValueSource::ListLiteral(values) => {
-            let values = values.iter().map(|x| calc_value(x, state)).collect();
+            let values = values.iter().map(|x| calc_value(x, state, io)).collect();
 
             state.add_object(RuntimeObject::List(values))
         }
         ValueSource::MemberAccess { name, item } => {
-            let RuntimeValue::Object(id) = calc_value(item, state) else {
+            let RuntimeValue::Object(id) = calc_value(item, state, io) else {
                 unimplemented!()
             };
 
@@ -168,7 +174,7 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
         ValueSource::StructConstruction(items) => {
             let struc = items
                 .iter()
-                .map(|(name, val)| (name.clone(), calc_value(val, state)))
+                .map(|(name, val)| (name.clone(), calc_value(val, state, io)))
                 .collect::<Vec<_>>();
 
             state.add_object(RuntimeObject::Struct(struc))
@@ -178,7 +184,7 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
             let object = RuntimeObject::Enum(
                 enum_member.clone(),
                 if let Some(val) = op {
-                    Some(calc_value(val, state))
+                    Some(calc_value(val, state, io))
                 } else {
                     None
                 },
@@ -186,7 +192,7 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
             state.add_object(object)
         }
         ValueSource::Match(typed_value, items) => {
-            let RuntimeValue::Object(index) = calc_value(typed_value, state) else {
+            let RuntimeValue::Object(index) = calc_value(typed_value, state, io) else {
                 unimplemented!()
             };
 
@@ -205,13 +211,13 @@ fn calc_value(value: &TypedValue, state: &mut State) -> RuntimeValue {
                         .is_none()
                 );
 
-                let val = exec(&match_arm.2, state);
+                let val = exec(&match_arm.2, state, io);
 
                 assert!(state.vars.remove(enum_var).is_some());
 
                 val
             } else {
-                exec(&match_arm.2, state)
+                exec(&match_arm.2, state, io)
             }
         }
     }
